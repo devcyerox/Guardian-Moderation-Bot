@@ -17,35 +17,34 @@ function wrapInteractionForTranslation(interaction, userLang) {
     const originalFollowUp = interaction.followUp.bind(interaction);
     const originalDeferReply = interaction.deferReply?.bind(interaction);
 
-    if (!userLang || userLang.toLowerCase() === 'en') {
-        return { originalReply, originalEditReply };
-    }
-
+    const isEnglish = !userLang || userLang.toLowerCase() === 'en';
     const translatePayload = async (payload) => {
-        if (payload == null) return payload;
+        if (payload == null || isEnglish) return payload;
         const options = typeof payload === 'string' ? { content: payload } : { ...payload };
         return translateResponse(options, userLang);
     };
 
     const replyOptions = (o) => {
         if (typeof o === 'string') return { content: o };
-        const safe = {};
-        if (o.content !== undefined && o.content !== null) safe.content = o.content;
-        if (o.embeds !== undefined) safe.embeds = o.embeds;
-        if (o.components !== undefined) safe.components = o.components;
-        if (o.files !== undefined) safe.files = o.files;
-        if (o.ephemeral !== undefined) safe.ephemeral = o.ephemeral;
-        if (o.fetchReply !== undefined) safe.fetchReply = o.fetchReply;
-        if (o.allowedMentions !== undefined) safe.allowedMentions = o.allowedMentions;
-        if (o.tts !== undefined) safe.tts = o.tts;
-        if (o.flags !== undefined) safe.flags = o.flags;
+        const safe = { ...o };
+        if (o.ephemeral !== undefined) {
+            safe.flags = safe.flags || [];
+            if (o.ephemeral && !safe.flags.includes(Discord.MessageFlags.Ephemeral)) {
+                safe.flags.push(Discord.MessageFlags.Ephemeral);
+            }
+            delete safe.ephemeral;
+        }
+        if (o.fetchReply !== undefined) {
+            safe.withResponse = o.fetchReply;
+            delete safe.fetchReply;
+        }
         return safe;
     };
 
     const editPayload = (o) => {
         const safe = replyOptions(o);
         delete safe.ephemeral;
-        delete safe.fetchReply;
+        // In d.js 14, editReply also uses withResponse instead of fetchReply
         return safe;
     };
 
@@ -53,7 +52,7 @@ function wrapInteractionForTranslation(interaction, userLang) {
         const fallback = typeof options === 'string' ? { content: options } : options;
         try {
             if (!interaction.deferred && originalDeferReply) {
-                await originalDeferReply({ ephemeral: fallback.ephemeral ?? false });
+                await originalDeferReply({ flags: fallback.ephemeral ? [Discord.MessageFlags.Ephemeral] : (fallback.flags || []) });
             }
             const translated = await translatePayload(options);
             if (interaction.deferred) {
@@ -102,9 +101,10 @@ module.exports = {
         const guildId = interaction.guild?.id || 'dm';
         const dbUser = await UsersManager.fetch(interaction.user.id, guildId);
         const userLang = dbUser.language;
+        const needsTranslation = userLang && userLang.toLowerCase() !== 'en';
 
         const translateContent = async (text) =>
-            userLang && userLang.toLowerCase() !== 'en'
+            needsTranslation
                 ? await translateText(text, userLang)
                 : text;
 
@@ -169,9 +169,14 @@ module.exports = {
             });
         }
 
-        const needsTranslation = userLang && userLang.toLowerCase() !== 'en';
-        if (needsTranslation && interaction.deferReply) {
-            await interaction.deferReply({ ephemeral: true }).catch(() => {});
+        if (needsTranslation) {
+            try {
+                if (interaction.deferReply) {
+                    await interaction.deferReply({ flags: [Discord.MessageFlags.Ephemeral] });
+                }
+            } catch (err) {
+                console.error('Error deferring interaction:', err);
+            }
         }
 
         const { originalReply, originalEditReply } = wrapInteractionForTranslation(
@@ -182,8 +187,15 @@ module.exports = {
         if (!executeFunction) {
             return interaction.reply({
                 content: await translateContent('This command has no execution function.'),
-                ephemeral: true,
+                flags: [Discord.MessageFlags.Ephemeral],
             });
+        }
+
+        // Specifically for help command or other slow commands, ensure deferral
+        if (!interaction.deferred && !interaction.replied) {
+            if (interaction.commandName === 'help') {
+                await interaction.deferReply({ flags: [Discord.MessageFlags.Ephemeral] }).catch(() => { });
+            }
         }
 
         const response = await executeFunction(interaction, client, dbGuild, dbUser);
@@ -192,7 +204,7 @@ module.exports = {
             let parsedResponse = {
                 embeds: response.embeds || [],
                 components: response.components || [],
-                ephemeral: response.ephemeral || false,
+                flags: response.ephemeral ? [Discord.MessageFlags.Ephemeral] : (response.flags || []),
             };
 
             // Only set content if it exists and is not empty
@@ -218,9 +230,9 @@ module.exports = {
             }
 
             if (interaction.replied || interaction.deferred) {
-                originalEditReply(parsedResponse);
+                await originalEditReply(parsedResponse);
             } else {
-                originalReply(parsedResponse);
+                await originalReply(parsedResponse);
             }
         }
     },

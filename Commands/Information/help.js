@@ -240,12 +240,16 @@ module.exports = {
             if (idx >= 0) startPage = idx + 1; // +1 because page 0 is overview
         }
 
-        const ephemeral = true;
+        const flags = [Discord.MessageFlags.Ephemeral];
         if (embeds.length === 1) {
-            return {
+            const payload = {
                 embeds: [embeds[0].setFooter({ text: 'Page 1/1' })],
-                ephemeral,
+                flags,
             };
+            if (interaction.deferred || interaction.replied) {
+                return await interaction.editReply(payload);
+            }
+            return await interaction.reply(payload);
         }
 
         let page = Math.min(startPage, embeds.length - 1);
@@ -292,8 +296,13 @@ module.exports = {
             ],
         });
 
-        const payload = { ...updatePayload(page), ephemeral, fetchReply: true };
-        const sent = await interaction.reply(payload);
+        const payload = { ...updatePayload(page), flags, withResponse: true };
+        const response = interaction.deferred || interaction.replied
+            ? await interaction.editReply(payload)
+            : await interaction.reply(payload);
+
+        const sent = response?.resource?.message || response;
+        if (!sent) return;
 
         const filter = (i) =>
             ['help_first', 'help_prev', 'help_next', 'help_home', 'help_last'].includes(
@@ -314,15 +323,19 @@ module.exports = {
                 userLang && userLang.toLowerCase() !== 'en'
                     ? await translateText(footerText, userLang)
                     : footerText;
-            await i.update({
-                ...payload,
-                embeds: [
-                    embeds[page].setFooter({
-                        text: translatedFooter,
-                        iconURL: interaction.user.displayAvatarURL(),
-                    }),
-                ],
-            });
+            try {
+                await i.update({
+                    ...payload,
+                    embeds: [
+                        embeds[page].setFooter({
+                            text: translatedFooter,
+                            iconURL: interaction.user.displayAvatarURL(),
+                        }),
+                    ],
+                });
+            } catch (err) {
+                console.error('Help collector update error:', err);
+            }
         });
 
         collector.on('end', async () => {
